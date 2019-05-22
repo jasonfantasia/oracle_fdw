@@ -1,4 +1,8 @@
-Version 2.1.1
+Version 2.2.0
+  Enhancements:
+  - Add support for COPY to foreign tables (from PostgreSQL v11 on).
+    This caused a crash before, as reported by "jkldv".
+
   Bugfixes:
   - Fix crash or bad results with pushed down join queries.
     The query target list can change during query planning, but oracle_fdw
@@ -15,6 +19,11 @@ Version 2.1.1
     Reported by Andy Shipman.
   - Fix crash or bad results in queries with IN or "= ANY" where the element
     type on the right-hand side is different from the left-hand side type.
+  - Add support for reading infinite NUMBERs.
+    Oracle NUMBER has infinite values, which are represented as "~" and "-~".
+    Since PostgreSQL's "numeric" does not know infinity, map these values
+    to NaN in this case.  For "real" and "double precision" we can use the
+    normal infinity values.
 
 Version 2.1.0, released 2018-10-01
   Enhancements:

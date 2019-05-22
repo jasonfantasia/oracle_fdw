@@ -340,13 +340,45 @@ SELECT * FROM qtest ORDER BY id;
 
 DELETE FROM qtest WHERE id = 5;
 /*
+ * Test COPY
+ */
+BEGIN;
+COPY typetest1 FROM STDIN;
+ROLLBACK;
+/*
+ * Test foreign table as a partition.
+ */
+CREATE TABLE party (LIKE typetest1) PARTITION BY RANGE (id);
+CREATE TABLE defpart PARTITION OF party DEFAULT;
+ALTER TABLE party ATTACH PARTITION typetest1 FOR VALUES FROM (1) TO (MAXVALUE);
+BEGIN;
+COPY party FROM STDIN;
+INSERT INTO party (id, lc, lr, lb)
+   VALUES (12, 'very long character', '\x0001020304', '\xFFFEFDFC');
+SELECT id, lr, lb, c FROM typetest1 ORDER BY id;
+ id  |             lr             |             lb             |          c           
+-----+----------------------------+----------------------------+----------------------
+   1 | \xdeadbeef00               | \xdeadbeef00               | fixed chau
+   3 | \xdeadf00ddeadf00ddeadf00d | \xdeadf00ddeadf00ddeadf00d | a\x1B\x07\r\x7Fb    
+   4 | \xdeadf00d                 | \xdeadf00d                 | short     
+  12 | \x0001020304               | \xfffefdfc                 | 
+ 666 | \xffff                     | \x01020304                 | cöpy      
+ 777 | \x00                       | \x00                       | fdjkl     
+(6 rows)
+
+ROLLBACK;
+/*
  * Test triggers on foreign tables.
  */
 -- trigger function
 CREATE FUNCTION shorttrig() RETURNS trigger LANGUAGE plpgsql AS
 $$BEGIN
-   RAISE WARNING 'trigger % % OLD row: id = %, c = %', TG_WHEN, TG_OP, OLD.id, OLD.c;
-   RAISE WARNING 'trigger % % NEW row: id = %, c = %', TG_WHEN, TG_OP, NEW.id, NEW.c;
+   IF TG_OP IN ('UPDATE', 'DELETE') THEN
+      RAISE WARNING 'trigger % % OLD row: id = %, c = %', TG_WHEN, TG_OP, OLD.id, OLD.c;
+   END IF;
+   IF TG_OP IN ('INSERT', 'UPDATE') THEN
+      RAISE WARNING 'trigger % % NEW row: id = %, c = %', TG_WHEN, TG_OP, NEW.id, NEW.c;
+   END IF;
    RETURN NEW;
 END;$$;
 -- test BEFORE trigger
@@ -363,6 +395,15 @@ BEGIN;
 UPDATE shorty SET id = id + 1 WHERE id = 4;
 WARNING:  trigger AFTER UPDATE OLD row: id = 4, c = short     
 WARNING:  trigger AFTER UPDATE NEW row: id = 5, c = short     
+ROLLBACK;
+-- test AFTER INSERT trigger with COPY
+DROP TRIGGER shorttrig ON shorty;
+CREATE TRIGGER shorttrig AFTER INSERT ON shorty FOR EACH ROW EXECUTE PROCEDURE shorttrig();
+BEGIN;
+COPY shorty FROM STDIN;
+WARNING:  trigger AFTER INSERT NEW row: id = 42, c = hammer    
+WARNING:  trigger AFTER INSERT NEW row: id = 753, c = rom       
+WARNING:  trigger AFTER INSERT NEW row: id = 0, c = <NULL>
 ROLLBACK;
 /*
  * Test ORDER BY pushdown.
