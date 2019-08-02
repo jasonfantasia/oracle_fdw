@@ -2,6 +2,9 @@ Version 2.2.0
   Enhancements:
   - Add support for COPY to foreign tables (from PostgreSQL v11 on).
     This caused a crash before, as reported by "jkldv".
+  - Add a new "collation" option for IMPORT FOREIGN SCHEMA that controls
+    case folding.
+    Patch by Sahap Asci.
 
   Bugfixes:
   - Fix crash or bad results with pushed down join queries.
@@ -24,6 +27,9 @@ Version 2.2.0
     Since PostgreSQL's "numeric" does not know infinity, map these values
     to NaN in this case.  For "real" and "double precision" we can use the
     normal infinity values.
+  - The "readonly" option of IMPORT FOREIGN SCHEMA didn't work properly:
+    When set to "false", it would still create read-only foreign tables.
+    Reported by Jacob Roberts.
 
 Version 2.1.0, released 2018-10-01
   Enhancements:
