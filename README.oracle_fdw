@@ -28,9 +28,10 @@ Special thanks to Christian Ullrich for ongoing help with Windows.
 This is a simple example how to use oracle_fdw.  
 More detailed information will be provided in the sections
 [Options](#3-options) and [Usage](#4-usage).  You should also read the
-[PostgreSQL documentation on foreign data]
-(https://www.postgresql.org/docs/current/static/ddl-foreign-data.html)
-and the commands referenced there.
+[PostgreSQL documentation on foreign data][fd] and the commands referenced
+there.
+
+ [fd]: https://www.postgresql.org/docs/current/static/ddl-foreign-data.html
 
 For the sake of this example, let's assume you can connect as operating system
 user `postgres` (or whoever starts the PostgreSQL server) with the following
@@ -188,10 +189,10 @@ Foreign table options
 
 - **max_long** (optional, defaults to "32767")
 
-  The maximal length of any LONG or LONG RAW columns in the Oracle table.
-  Possible values are integers between 1 and 1073741823 (the maximal size of a
-  `bytea` in PostgreSQL).  This amount of memory will be allocated at least
-  twice, so large values will consume a lot of memory.  
+  The maximal length of any LONG, LONG RAW and XMLTYPE columns in the Oracle
+  table.  Possible values are integers between 1 and 1073741823 (the maximal
+  size of a `bytea` in PostgreSQL).  This amount of memory will be allocated
+  at least twice, so large values will consume a lot of memory.  
   If **max_long** is less than the length of the longest value retrieved,
   you will receive the error message `ORA-01406: fetched column value was
   truncated`.
@@ -319,9 +320,14 @@ These conversions are automatically handled by oracle_fdw:
        LOCAL TIME ZONE       |
     INTERVAL YEAR TO MONTH   | interval, char, varchar, text
     INTERVAL DAY TO SECOND   | interval, char, varchar, text
+    XMLTYPE                  | xml, char, varchar, text
     MDSYS.SDO_GEOMETRY       | geometry (see "PostGIS support" below)
 
 If a NUMBER is converted to a boolean, 0 means `false`, everything else `true`.
+
+Inserting or updating XMLTYPE only works with values that do not exceed the
+maximum length of the VARCHAR2 data type (4000 or 32767, depending on the
+`MAX_STRING_SIZE` parameter).
 
 NCLOB is currently not supported because Oracle cannot automatically convert
 it to the client encoding.
@@ -365,7 +371,6 @@ that performs the join on the Oracle side.
 There are some restrictions when this can happen:
 
 - Both tables must be defined on the same foreign server.
-- The join must be an inner join.
 - Joins between three or more tables won't be pushed down.
 - The join must be in a SELECT statement.
 - oracle_fdw must be able to push down all join conditions and WHERE clauses.
@@ -526,18 +531,17 @@ If you want to try it nonetheless, you'll have to build oracle_fdw from source.
 If you encounter problems while using such a PostgreSQL-derived server,
 please try with the original version before reporting an issue.
 
-Oracle client version 10.2 or better is required.
+Oracle client version 11.2 or better is required.
 oracle_fdw can be built and used with Oracle Instant Client as well as with
 Oracle Client and Server installations installed with Universal Installer.
-Binaries compiled with Oracle Client 10 can be used with later client versions
+Binaries compiled with Oracle Client 11 can be used with later client versions
 without recompilation or relink.
 
 The supported Oracle server versions depend on the used client version (see the
-Oracle Client/Server Interoperability Matrix in support document 207303.1).
-For maximum coverage use Oracle Client 10.2.0.5, as this will allow you to
-connect to every server version from 8.1.7 to 12.1.0 except 9.0.1.  
-PostgreSQL and Oracle need to have the same architecture, for example you
-cannot have 32-bit software for the one and 64-bit software for the other.
+Oracle Client/Server Interoperability Matrix in Oracle Support document
+207303.1).  PostgreSQL and Oracle need to have the same architecture.
+For example, you cannot have 32-bit software for the one and 64-bit software
+for the other.
 
 It is advisable to use the latest Patch Set on both Oracle client and server,
 particularly with desupported Oracle versions.  

@@ -15,7 +15,7 @@
 #include <sys/types.h>
 
 /* oracle_fdw version */
-#define ORACLE_FDW_VERSION "2.2.0devel"
+#define ORACLE_FDW_VERSION "2.2.0"
 
 #ifdef OCI_ORACLE
 /*
@@ -88,6 +88,7 @@ typedef enum
 	ORA_TYPE_LONG,
 	ORA_TYPE_LONGRAW,
 	ORA_TYPE_GEOMETRY,
+	ORA_TYPE_XMLTYPE,
 	ORA_TYPE_OTHER
 } oraType;
 

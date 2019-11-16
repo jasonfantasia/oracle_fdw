@@ -139,6 +139,15 @@
 #define JSONOID InvalidOid
 #endif
 
+/* list API has changed in v13 */
+#if PG_VERSION_NUM < 130000
+#define list_next(l, e) lnext((e))
+#define do_each_cell(cell, list, element) for_each_cell(cell, (element))
+#else
+#define list_next(l, e) lnext((l), (e))
+#define do_each_cell(cell, list, element) for_each_cell(cell, (list), (element))
+#endif  /* PG_VERSION_NUM */
+
 PG_MODULE_MAGIC;
 
 /*
@@ -2256,15 +2265,22 @@ oracleImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 
 			/* look up collation within pg_catalog namespace with the name */
 
+#if PG_VERSION_NUM >= 120000
 			collation = GetSysCacheOid3(
 							COLLNAMEENCNSP,
-#if PG_VERSION_NUM >= 120000
 							Anum_pg_collation_oid,
-#endif  /* PG_VERSION_NUM */
 							PointerGetDatum(s),
 							Int32GetDatum(Int32GetDatum(-1)),
 							ObjectIdGetDatum(PG_CATALOG_NAMESPACE)
 						);
+#else
+			collation = GetSysCacheOid3(
+							COLLNAMEENCNSP,
+							PointerGetDatum(s),
+							Int32GetDatum(Int32GetDatum(-1)),
+							ObjectIdGetDatum(PG_CATALOG_NAMESPACE)
+						);
+#endif  /* PG_VERSION_NUM */
 
 			if (!OidIsValid(collation))
 				ereport(ERROR,
@@ -2434,6 +2450,9 @@ oracleImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 					break;
 				case ORA_TYPE_INTERVALY2M:
 					appendStringInfo(&buf, "interval(0)");
+					break;
+				case ORA_TYPE_XMLTYPE:
+					appendStringInfo(&buf, "xml");
 					break;
 				case ORA_TYPE_GEOMETRY:
 					if (GEOMETRYOID != InvalidOid)
@@ -2714,7 +2733,11 @@ char
 			ADD_REL_QUALIFIER(&alias, fdwState->oraTable->cols[i]->varno);
 
 			/* add qualified column name */
-			appendStringInfo(&query, "%s%s%s", separator, alias.data, fdwState->oraTable->cols[i]->name);
+			if (fdwState->oraTable->cols[i]->oratype == ORA_TYPE_XMLTYPE)
+				/* convert XML to CLOB in the query */
+				appendStringInfo(&query, "%s(%s%s).getclobval()", separator, alias.data, fdwState->oraTable->cols[i]->name);
+			else
+				appendStringInfo(&query, "%s%s%s", separator, alias.data, fdwState->oraTable->cols[i]->name);
 			separator = ", ";
 		}
 	}
@@ -4057,7 +4080,7 @@ deparseExpr(oracleSession *session, RelOptInfo *foreignrel, Expr *expr, const st
 					boolexpr->boolop == NOT_EXPR ? "NOT " : "",
 					arg);
 
-			for_each_cell(cell, lnext(list_head(boolexpr->args)))
+			do_each_cell(cell, boolexpr->args, list_next(boolexpr->args, list_head(boolexpr->args)))
 			{
 				arg = deparseExpr(session, foreignrel, (Expr *)lfirst(cell), oraTable, params);
 				if (arg == NULL)
@@ -4885,6 +4908,10 @@ checkDataType(oraType oratype, int scale, Oid pgtype, const char *tablename, con
 			&& pgtype == JSONOID)
 		return;
 
+    /* XMLTYPE can be converted to xml */
+    if (oratype == ORA_TYPE_XMLTYPE && pgtype == XMLOID)
+        return;
+
 	/* otherwise, report an error */
 	ereport(ERROR,
 			(errcode(ERRCODE_FDW_INVALID_DATA_TYPE),
@@ -5187,38 +5214,38 @@ struct OracleFdwState
 
 	/* dbserver */
 	state->dbserver = deserializeString(lfirst(cell));
-	cell = lnext(cell);
+	cell = list_next(list, cell);
 
 	/* user */
 	state->user = deserializeString(lfirst(cell));
-	cell = lnext(cell);
+	cell = list_next(list, cell);
 
 	/* password */
 	state->password = deserializeString(lfirst(cell));
-	cell = lnext(cell);
+	cell = list_next(list, cell);
 
 	/* nls_lang */
 	state->nls_lang = deserializeString(lfirst(cell));
-	cell = lnext(cell);
+	cell = list_next(list, cell);
 
 	/* query */
 	state->query = deserializeString(lfirst(cell));
-	cell = lnext(cell);
+	cell = list_next(list, cell);
 
 	/* Oracle prefetch count */
 	state->prefetch = (unsigned int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
-	cell = lnext(cell);
+	cell = list_next(list, cell);
 
 	/* table data */
 	state->oraTable = (struct oraTable *)palloc(sizeof(struct oraTable));
 	state->oraTable->name = deserializeString(lfirst(cell));
-	cell = lnext(cell);
+	cell = list_next(list, cell);
 	state->oraTable->pgname = deserializeString(lfirst(cell));
-	cell = lnext(cell);
+	cell = list_next(list, cell);
 	state->oraTable->ncols = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
-	cell = lnext(cell);
+	cell = list_next(list, cell);
 	state->oraTable->npgcols = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
-	cell = lnext(cell);
+	cell = list_next(list, cell);
 	state->oraTable->cols = (struct oraColumn **)palloc(sizeof(struct oraColumn *) * state->oraTable->ncols);
 
 	/* loop columns */
@@ -5226,25 +5253,25 @@ struct OracleFdwState
 	{
 		state->oraTable->cols[i] = (struct oraColumn *)palloc(sizeof(struct oraColumn));
 		state->oraTable->cols[i]->name = deserializeString(lfirst(cell));
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		state->oraTable->cols[i]->oratype = (oraType)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		state->oraTable->cols[i]->scale = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		state->oraTable->cols[i]->pgname = deserializeString(lfirst(cell));
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		state->oraTable->cols[i]->pgattnum = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		state->oraTable->cols[i]->pgtype = DatumGetObjectId(((Const *)lfirst(cell))->constvalue);
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		state->oraTable->cols[i]->pgtypmod = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		state->oraTable->cols[i]->used = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		state->oraTable->cols[i]->pkey = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		state->oraTable->cols[i]->val_size = deserializeLong(lfirst(cell));
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		/* allocate memory for the result value */
 		state->oraTable->cols[i]->val = (char *)palloc(state->oraTable->cols[i]->val_size + 1);
 		state->oraTable->cols[i]->val_len = 0;
@@ -5254,7 +5281,7 @@ struct OracleFdwState
 
 	/* length of parameter list */
 	len = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
-	cell = lnext(cell);
+	cell = list_next(list, cell);
 
 	/* parameter table entries */
 	state->paramList = NULL;
@@ -5262,11 +5289,11 @@ struct OracleFdwState
 	{
 		param = (struct paramDesc *)palloc(sizeof(struct paramDesc));
 		param->name = deserializeString(lfirst(cell));
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		param->type = DatumGetObjectId(((Const *)lfirst(cell))->constvalue);
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		param->bindType = (oraBindType)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		if (param->bindType == BIND_OUTPUT)
 			param->value = (void *)42;  /* something != NULL */
 		else
@@ -5274,7 +5301,7 @@ struct OracleFdwState
 		param->node = NULL;
 		param->bindh = NULL;
 		param->colnum = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
-		cell = lnext(cell);
+		cell = list_next(list, cell);
 		param->next = state->paramList;
 		state->paramList = param;
 	}
@@ -5932,7 +5959,10 @@ appendReturningClause(StringInfo sql, struct OracleFdwState *fdwState)
 			}
 			else
 				appendStringInfo(sql, ", ");
-			appendStringInfo(sql, "%s", fdwState->oraTable->cols[i]->name);
+			if (fdwState->oraTable->cols[i]->oratype == ORA_TYPE_XMLTYPE)
+				appendStringInfo(sql, "(%s).getclobval()", fdwState->oraTable->cols[i]->name);
+			else
+				appendStringInfo(sql, "%s", fdwState->oraTable->cols[i]->name);
 		}
 
 	/* add the parameters for the RETURNING clause */
