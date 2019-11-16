@@ -148,6 +148,12 @@
 #define do_each_cell(cell, list, element) for_each_cell(cell, (list), (element))
 #endif  /* PG_VERSION_NUM */
 
+/* "table_open" was "heap_open" before v12 */
+#if PG_VERSION_NUM < 120000
+#define table_open(x, y) heap_open(x, y)
+#define table_close(x, y) heap_close(x, y)
+#endif  /* PG_VERSION_NUM */
+
 PG_MODULE_MAGIC;
 
 /*
@@ -668,7 +674,7 @@ oracle_diag(PG_FUNCTION_ARGS)
 		oracleSession *session;
 
 		/* look up foreign server with this name */
-		rel = heap_open(ForeignServerRelationId, AccessShareLock);
+		rel = table_open(ForeignServerRelationId, AccessShareLock);
 
 		tup = SearchSysCacheCopy1(FOREIGNSERVERNAME, NameGetDatum(srvname));
 		if (!HeapTupleIsValid(tup))
@@ -682,7 +688,7 @@ oracle_diag(PG_FUNCTION_ARGS)
 		srvId = ((Form_pg_foreign_server)GETSTRUCT(tup))->oid;
 #endif
 
-		heap_close(rel, AccessShareLock);
+		table_close(rel, AccessShareLock);
 
 		/* get the foreign server, the user mapping and the FDW */
 		server = GetForeignServer(srvId);
@@ -1179,13 +1185,13 @@ ForeignScan
 		 * Core code already has some lock on each rel being planned, so we can
 		 * use NoLock here.
 		 */
-		rel = heap_open(foreigntableid, NoLock);
+		rel = table_open(foreigntableid, NoLock);
 
 		/* is there an AFTER trigger FOR EACH ROW? */
 		has_trigger = (foreignrel->relid == root->parse->resultRelation)
 						&& hasTrigger(rel, root->parse->commandType);
 
-		heap_close(rel, NoLock);
+		table_close(rel, NoLock);
 
 		if (has_trigger)
 		{
@@ -1650,7 +1656,7 @@ oraclePlanForeignModify(PlannerInfo *root, ModifyTable *plan, Index resultRelati
 	 * Core code already has some lock on each rel being planned, so we can
 	 * use NoLock here.
 	 */
-	rel = heap_open(rte->relid, NoLock);
+	rel = table_open(rte->relid, NoLock);
 
 	/* figure out which attributes are affected and if there is a trigger */
 	switch (operation)
@@ -1707,7 +1713,7 @@ oraclePlanForeignModify(PlannerInfo *root, ModifyTable *plan, Index resultRelati
 			elog(ERROR, "unexpected operation: %d", (int) operation);
 	}
 
-	heap_close(rel, NoLock);
+	table_close(rel, NoLock);
 
 	/* mark all attributes for which we need a RETURNING clause */
 	if (has_trigger)
@@ -2625,7 +2631,7 @@ getColumnData(Oid foreigntableid, struct oraTable *oraTable)
 	TupleDesc tupdesc;
 	int i, index;
 
-	rel = heap_open(foreigntableid, NoLock);
+	rel = table_open(foreigntableid, NoLock);
 	tupdesc = rel->rd_att;
 
 	/* number of PostgreSQL columns */
@@ -2672,7 +2678,7 @@ getColumnData(Oid foreigntableid, struct oraTable *oraTable)
 #endif	/* OLD_FDW_API */
 	}
 
-	heap_close(rel, NoLock);
+	table_close(rel, NoLock);
 }
 
 /*
