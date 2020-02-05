@@ -12,7 +12,72 @@ CREATE SERVER oracle FOREIGN DATA WRAPPER oracle_fdw OPTIONS (dbserver '');
 
 CREATE USER MAPPING FOR PUBLIC SERVER oracle OPTIONS (user 'SCOTT', password 'tiger');
 
--- Oracle table TYPETEST1 must be created for this one
+-- drop the Oracle tables if they exist
+DO
+$$BEGIN
+   SELECT oracle_execute('oracle', 'DROP TABLE scott.typetest1 PURGE');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+
+DO
+$$BEGIN
+   SELECT oracle_execute('oracle', 'DROP TABLE scott.gis PURGE');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+
+SELECT oracle_execute(
+          'oracle',
+          E'CREATE TABLE scott.typetest1 (\n'
+          '   id  NUMBER(5)\n'
+          '      CONSTRAINT typetest1_pkey PRIMARY KEY,\n'
+          '   c   CHAR(10 CHAR),\n'
+          '   nc  NCHAR(10),\n'
+          '   vc  VARCHAR2(10 CHAR),\n'
+          '   nvc NVARCHAR2(10),\n'
+          '   lc  CLOB,\n'
+          '   r   RAW(10),\n'
+          '   u   RAW(16),\n'
+          '   lb  BLOB,\n'
+          '   lr  LONG RAW,\n'
+          '   b   NUMBER(1),\n'
+          '   num NUMBER(7,5),\n'
+          '   fl  BINARY_FLOAT,\n'
+          '   db  BINARY_DOUBLE,\n'
+          '   d   DATE,\n'
+          '   ts  TIMESTAMP WITH TIME ZONE,\n'
+          '   ids INTERVAL DAY TO SECOND,\n'
+          '   iym INTERVAL YEAR TO MONTH\n'
+          ') SEGMENT CREATION IMMEDIATE'
+       );
+
+SELECT oracle_execute(
+          'oracle',
+          E'CREATE TABLE scott.gis (\n'
+          '   id  NUMBER(5) PRIMARY KEY,\n'
+          '   g   MDSYS.SDO_GEOMETRY\n'
+          ') SEGMENT CREATION IMMEDIATE'
+       );
+
+-- gather statistics
+SELECT oracle_execute(
+          'oracle',
+          E'BEGIN\n'
+          '   DBMS_STATS.GATHER_TABLE_STATS (''SCOTT'', ''TYPETEST1'', NULL, 100);\n'
+          'END;'
+       );
+
+SELECT oracle_execute(
+          'oracle',
+          E'BEGIN\n'
+          '   DBMS_STATS.GATHER_TABLE_STATS (''SCOTT'', ''GIS'', NULL, 100);\n'
+          'END;'
+       );
+
+-- create the foreign tables
 CREATE FOREIGN TABLE typetest1 (
    id  integer OPTIONS (key 'yes') NOT NULL,
    q   double precision,
@@ -180,6 +245,22 @@ UPDATE shorty SET c = NULL WHERE FALSE RETURNING *;
 SELECT id FROM typetest1 WHERE vc = ANY ('{zzzzz}'::name[]);
 
 /*
+ * Test "strip_zeros" column option.
+ */
+
+SELECT oracle_execute(
+          'oracle',
+          'INSERT INTO typetest1 (id, vc) VALUES (5, ''has'' || chr(0) || ''zeros'')'
+       );
+
+SELECT vc FROM typetest1 WHERE id = 5;  -- should fail
+ALTER FOREIGN TABLE typetest1 ALTER vc OPTIONS (ADD strip_zeros 'yes');
+SELECT vc FROM typetest1 WHERE id = 5;  -- should work
+ALTER FOREIGN TABLE typetest1 ALTER vc OPTIONS (DROP strip_zeros);
+
+DELETE FROM typetest1 WHERE id = 5;
+
+/*
  * Test EXPLAIN support.
  */
 
@@ -328,3 +409,12 @@ SELECT id, nc FROM badtypes WHERE id = 1;
 INSERT INTO badtypes (id, nc) VALUES (42, XML '<empty/>');
 -- remove foreign table
 DROP FOREIGN TABLE badtypes;
+
+/*
+ * Test subplans (initplans)
+ */
+
+-- testcase for bug #364
+SELECT id FROM typetest1
+WHERE vc NOT IN (SELECT * FROM (VALUES ('short'), ('other')) AS q)
+ORDER BY id;

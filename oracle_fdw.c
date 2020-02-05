@@ -181,11 +181,13 @@ struct OracleFdwOption
 #define OPT_DBSERVER "dbserver"
 #define OPT_USER "user"
 #define OPT_PASSWORD "password"
+#define OPT_DBLINK "dblink"
 #define OPT_SCHEMA "schema"
 #define OPT_TABLE "table"
 #define OPT_MAX_LONG "max_long"
 #define OPT_READONLY "readonly"
 #define OPT_KEY "key"
+#define OPT_STRIP_ZEROS "strip_zeros"
 #define OPT_SAMPLE "sample_percent"
 #define OPT_PREFETCH "prefetch"
 
@@ -205,6 +207,7 @@ static struct OracleFdwOption valid_options[] = {
 	{OPT_DBSERVER, ForeignServerRelationId, true},
 	{OPT_USER, UserMappingRelationId, true},
 	{OPT_PASSWORD, UserMappingRelationId, true},
+	{OPT_DBLINK, ForeignTableRelationId, false},
 	{OPT_SCHEMA, ForeignTableRelationId, false},
 	{OPT_TABLE, ForeignTableRelationId, true},
 	{OPT_MAX_LONG, ForeignTableRelationId, false},
@@ -213,6 +216,7 @@ static struct OracleFdwOption valid_options[] = {
 	{OPT_PREFETCH, ForeignTableRelationId, false}
 #ifndef OLD_FDW_API
 	,{OPT_KEY, AttributeRelationId, false}
+	,{OPT_STRIP_ZEROS, AttributeRelationId, false}
 #endif	/* OLD_FDW_API */
 };
 
@@ -285,11 +289,13 @@ extern PGDLLEXPORT Datum oracle_fdw_handler(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum oracle_fdw_validator(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum oracle_close_connections(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum oracle_diag(PG_FUNCTION_ARGS);
+extern PGDLLEXPORT Datum oracle_execute(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(oracle_fdw_handler);
 PG_FUNCTION_INFO_V1(oracle_fdw_validator);
 PG_FUNCTION_INFO_V1(oracle_close_connections);
 PG_FUNCTION_INFO_V1(oracle_diag);
+PG_FUNCTION_INFO_V1(oracle_execute);
 
 /*
  * on-load initializer
@@ -363,6 +369,7 @@ static void getUsedColumns(Expr *expr, struct oraTable *oraTable, int foreignrel
 static void checkDataType(oraType oratype, int scale, Oid pgtype, const char *tablename, const char *colname);
 static char *deparseWhereConditions(struct OracleFdwState *fdwState, RelOptInfo *baserel, List **local_conds, List **remote_conds);
 static char *guessNlsLang(char *nls_lang);
+static oracleSession *oracleConnectServer(Name srvname);
 static List *serializePlanData(struct OracleFdwState *fdwState);
 static Const *serializeString(const char *s);
 static Const *serializeLong(long i);
@@ -508,6 +515,7 @@ oracle_fdw_validator(PG_FUNCTION_ARGS)
 		if (strcmp(def->defname, OPT_READONLY) == 0
 #ifndef OLD_FDW_API
 				|| strcmp(def->defname, OPT_KEY) == 0
+				|| strcmp(def->defname, OPT_STRIP_ZEROS) == 0
 #endif	/* OLD_FDW_API */
 			)
 		{
@@ -522,6 +530,17 @@ oracle_fdw_validator(PG_FUNCTION_ARGS)
 						(errcode(ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE),
 						errmsg("invalid value for option \"%s\"", def->defname),
 						errhint("Valid values in this context are: on/yes/true or off/no/false")));
+		}
+
+		/* check valid values for "dblink" */
+		if (strcmp(def->defname, OPT_DBLINK) == 0)
+		{
+			char *val = ((Value *)(def->arg))->val.str;
+			if (strchr(val, '"') != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE),
+						errmsg("invalid value for option \"%s\"", def->defname),
+						errhint("Double quotes are not allowed in the dblink name.")));
 		}
 
 		/* check valid values for "schema" */
@@ -620,7 +639,6 @@ oracle_close_connections(PG_FUNCTION_ARGS)
 PGDLLEXPORT Datum
 oracle_diag(PG_FUNCTION_ARGS)
 {
-	Oid srvId = InvalidOid;
 	char *pgversion;
 	int major, minor, update, patch, port_patch;
 	StringInfoData version;
@@ -661,70 +679,10 @@ oracle_diag(PG_FUNCTION_ARGS)
 	}
 	else
 	{
-		/* get the server version only if a non-null argument was given */
-		HeapTuple tup;
-		Relation rel;
-		Name srvname = PG_GETARG_NAME(0);
-		ForeignServer *server;
-		UserMapping *mapping;
-		ForeignDataWrapper *wrapper;
-		List *options;
-		ListCell *cell;
-		char *nls_lang = NULL, *user = NULL, *password = NULL, *dbserver = NULL;
 		oracleSession *session;
 
-		/* look up foreign server with this name */
-		rel = table_open(ForeignServerRelationId, AccessShareLock);
-
-		tup = SearchSysCacheCopy1(FOREIGNSERVERNAME, NameGetDatum(srvname));
-		if (!HeapTupleIsValid(tup))
-			ereport(ERROR,
-				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				errmsg("server \"%s\" does not exist", NameStr(*srvname))));
-
-#if PG_VERSION_NUM < 120000
-		srvId = HeapTupleGetOid(tup);
-#else
-		srvId = ((Form_pg_foreign_server)GETSTRUCT(tup))->oid;
-#endif
-
-		table_close(rel, AccessShareLock);
-
-		/* get the foreign server, the user mapping and the FDW */
-		server = GetForeignServer(srvId);
-		mapping = GetUserMapping(GetUserId(), srvId);
-		wrapper = GetForeignDataWrapper(server->fdwid);
-
-		/* get all options for these objects */
-		options = wrapper->options;
-		options = list_concat(options, server->options);
-		options = list_concat(options, mapping->options);
-
-		foreach(cell, options)
-		{
-			DefElem *def = (DefElem *) lfirst(cell);
-			if (strcmp(def->defname, OPT_NLS_LANG) == 0)
-				nls_lang = ((Value *) (def->arg))->val.str;
-			if (strcmp(def->defname, OPT_DBSERVER) == 0)
-				dbserver = ((Value *) (def->arg))->val.str;
-			if (strcmp(def->defname, OPT_USER) == 0)
-				user = ((Value *) (def->arg))->val.str;
-			if (strcmp(def->defname, OPT_PASSWORD) == 0)
-				password = ((Value *) (def->arg))->val.str;
-		}
-
-		/* guess a good NLS_LANG environment setting */
-		nls_lang = guessNlsLang(nls_lang);
-
-		/* connect to Oracle database */
-		session = oracleGetSession(
-			dbserver,
-			user,
-			password,
-			nls_lang,
-			NULL,
-			1
-		);
+		Name srvname = PG_GETARG_NAME(0);
+		session = oracleConnectServer(srvname);
 
 		/* get the server version */
 		oracleServerVersion(session, &major, &minor, &update, &patch, &port_patch);
@@ -735,6 +693,25 @@ oracle_diag(PG_FUNCTION_ARGS)
 	}
 
 	PG_RETURN_TEXT_P(cstring_to_text(version.data));
+}
+
+/*
+ * oracle_execute
+ * 		Execute a statement that returns no result values on a foreign server.
+ */
+PGDLLEXPORT Datum
+oracle_execute(PG_FUNCTION_ARGS)
+{
+	Name srvname = PG_GETARG_NAME(0);
+	char *stmt = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	oracleSession *session = oracleConnectServer(srvname);
+
+	oracleExecuteCall(session, stmt);
+
+	/* free the session (connection will be cached) */
+	pfree(session);
+
+	PG_RETURN_VOID();
 }
 
 /*
@@ -2209,7 +2186,7 @@ oracleImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 	UserMapping *mapping;
 	ForeignDataWrapper *wrapper;
 	char *tabname, *colname, oldtabname[129] = { '\0' }, *foldedname;
-	char *nls_lang = NULL, *user = NULL, *password = NULL, *dbserver = NULL;
+	char *nls_lang = NULL, *user = NULL, *password = NULL, *dbserver = NULL, *dblink = NULL;
 	oraType type;
 	int charlen, typeprec, typescale, nullable, key, rc;
 	List *options, *result = NIL;
@@ -2313,6 +2290,17 @@ oracleImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 						errmsg("invalid value for option \"%s\"", def->defname)));
 			continue;
 		}
+		else if (strcmp(def->defname, "dblink") == 0)
+		{
+			char *s = ((Value *) (def->arg))->val.str;
+			if (strchr(s, '"') != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE),
+						errmsg("invalid value for option \"%s\"", def->defname),
+						errhint("Double quotes are not allowed in the dblink name.")));
+			dblink = s;
+			continue;
+		}
 
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
@@ -2338,7 +2326,7 @@ oracleImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 	initStringInfo(&buf);
 	do {
 		/* get the next column definition */
-		rc = oracleGetImportColumn(session, stmt->remote_schema, &tabname, &colname, &type, &charlen, &typeprec, &typescale, &nullable, &key);
+		rc = oracleGetImportColumn(session, dblink, stmt->remote_schema, &tabname, &colname, &type, &charlen, &typeprec, &typescale, &nullable, &key);
 
 		if (rc == -1)
 		{
@@ -2357,6 +2345,8 @@ oracleImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 			/* finish previous CREATE FOREIGN TABLE statement */
 			appendStringInfo(&buf, ") SERVER \"%s\" OPTIONS (schema '%s', table '%s'",
 				server->servername, stmt->remote_schema, oldtabname);
+			if (dblink)
+				appendStringInfo(&buf, ", dblink '%s'", dblink);
 			if (readonly)
 				appendStringInfo(&buf, ", readonly 'true'");
 			appendStringInfo(&buf, ")");
@@ -2502,7 +2492,7 @@ struct OracleFdwState
 	char *pgtablename = get_rel_name(foreigntableid);
 	List *options;
 	ListCell *cell;
-	char *schema = NULL, *table = NULL, *maxlong = NULL, *sample = NULL, *fetch = NULL;
+	char *dblink = NULL, *schema = NULL, *table = NULL, *maxlong = NULL, *sample = NULL, *fetch = NULL;
 	long max_long;
 
 	/*
@@ -2521,6 +2511,8 @@ struct OracleFdwState
 			fdwState->user = ((Value *) (def->arg))->val.str;
 		if (strcmp(def->defname, OPT_PASSWORD) == 0)
 			fdwState->password = ((Value *) (def->arg))->val.str;
+		if (strcmp(def->defname, OPT_DBLINK) == 0)
+			dblink = ((Value *) (def->arg))->val.str;
 		if (strcmp(def->defname, OPT_SCHEMA) == 0)
 			schema = ((Value *) (def->arg))->val.str;
 		if (strcmp(def->defname, OPT_TABLE) == 0)
@@ -2578,7 +2570,7 @@ struct OracleFdwState
 	);
 
 	/* get remote table description */
-	fdwState->oraTable = oracleDescribe(fdwState->session, schema, table, pgtablename, max_long);
+	fdwState->oraTable = oracleDescribe(fdwState->session, dblink, schema, table, pgtablename, max_long);
 
 	/* add PostgreSQL data to table description */
 	getColumnData(foreigntableid, fdwState->oraTable);
@@ -2674,6 +2666,8 @@ getColumnData(Oid foreigntableid, struct oraTable *oraTable)
 				/* mark the column as primary key column */
 				oraTable->cols[index-1]->pkey = 1;
 			}
+			else if (strcmp(def->defname, OPT_STRIP_ZEROS) == 0 && optionIsTrue(((Value *)(def->arg))->val.str))
+				oraTable->cols[index-1]->strip_zeros = 1;
 		}
 #endif	/* OLD_FDW_API */
 	}
@@ -3363,7 +3357,7 @@ acquireSampleRowsFunc(Relation relation, int elevel, HeapTuple *rows, int targro
 
 	*totalrows = 0;
 
-	/* create a memory context for short-lived data in convertTuples() */
+	/* create a memory context for short-lived data in convertTuple() */
 	tmp_cxt = AllocSetContextCreate(CurrentMemoryContext,
 								"oracle_fdw temporary data",
 								ALLOCSET_SMALL_SIZES);
@@ -4609,6 +4603,9 @@ getUsedColumns(Expr *expr, struct oraTable *oraTable, int foreignrelid)
 		case T_CaseTestExpr:
 		case T_CoerceToDomainValue:
 		case T_CurrentOfExpr:
+#if PG_VERSION_NUM >= 100000
+		case T_NextValueExpr:
+#endif
 			break;
 		case T_Var:
 			variable = (Var *)expr;
@@ -4724,9 +4721,15 @@ getUsedColumns(Expr *expr, struct oraTable *oraTable, int foreignrelid)
 			}
 			break;
 		case T_SubPlan:
-			foreach(cell, ((SubPlan *)expr)->args)
 			{
-				getUsedColumns((Expr *)lfirst(cell), oraTable, foreignrelid);
+				SubPlan *subplan = (SubPlan *)expr;
+
+				getUsedColumns((Expr *)(subplan->testexpr), oraTable, foreignrelid);
+
+				foreach(cell, subplan->args)
+				{
+					getUsedColumns((Expr *)lfirst(cell), oraTable, foreignrelid);
+				}
 			}
 			break;
 		case T_AlternativeSubPlan:
@@ -5087,6 +5090,74 @@ char
 	return buf.data;
 }
 
+oracleSession *
+oracleConnectServer(Name srvname)
+{
+	Oid srvId = InvalidOid;
+	HeapTuple tup;
+	Relation rel;
+	ForeignServer *server;
+	UserMapping *mapping;
+	ForeignDataWrapper *wrapper;
+	List *options;
+	ListCell *cell;
+	char *nls_lang = NULL, *user = NULL, *password = NULL, *dbserver = NULL;
+
+	/* look up foreign server with this name */
+	rel = table_open(ForeignServerRelationId, AccessShareLock);
+
+	tup = SearchSysCacheCopy1(FOREIGNSERVERNAME, NameGetDatum(srvname));
+	if (!HeapTupleIsValid(tup))
+		ereport(ERROR,
+			(errcode(ERRCODE_UNDEFINED_OBJECT),
+			errmsg("server \"%s\" does not exist", NameStr(*srvname))));
+
+#if PG_VERSION_NUM < 120000
+	srvId = HeapTupleGetOid(tup);
+#else
+	srvId = ((Form_pg_foreign_server)GETSTRUCT(tup))->oid;
+#endif
+
+	table_close(rel, AccessShareLock);
+
+	/* get the foreign server, the user mapping and the FDW */
+	server = GetForeignServer(srvId);
+	mapping = GetUserMapping(GetUserId(), srvId);
+	wrapper = GetForeignDataWrapper(server->fdwid);
+
+	/* get all options for these objects */
+	options = wrapper->options;
+	options = list_concat(options, server->options);
+	options = list_concat(options, mapping->options);
+
+	foreach(cell, options)
+	{
+		DefElem *def = (DefElem *) lfirst(cell);
+		if (strcmp(def->defname, OPT_NLS_LANG) == 0)
+			nls_lang = ((Value *) (def->arg))->val.str;
+		if (strcmp(def->defname, OPT_DBSERVER) == 0)
+			dbserver = ((Value *) (def->arg))->val.str;
+		if (strcmp(def->defname, OPT_USER) == 0)
+			user = ((Value *) (def->arg))->val.str;
+		if (strcmp(def->defname, OPT_PASSWORD) == 0)
+			password = ((Value *) (def->arg))->val.str;
+	}
+
+	/* guess a good NLS_LANG environment setting */
+	nls_lang = guessNlsLang(nls_lang);
+
+	/* connect to Oracle database */
+	return oracleGetSession(
+		dbserver,
+		user,
+		password,
+		nls_lang,
+		NULL,
+		1
+	);
+}
+
+
 #define serializeInt(x) makeConst(INT4OID, -1, InvalidOid, 4, Int32GetDatum((int32)(x)), false, true)
 #define serializeOid(x) makeConst(OIDOID, -1, InvalidOid, 4, ObjectIdGetDatum(x), false, true)
 
@@ -5134,6 +5205,7 @@ List
 		result = lappend(result, serializeOid(fdwState->oraTable->cols[i]->pgtype));
 		result = lappend(result, serializeInt(fdwState->oraTable->cols[i]->pgtypmod));
 		result = lappend(result, serializeInt(fdwState->oraTable->cols[i]->used));
+		result = lappend(result, serializeInt(fdwState->oraTable->cols[i]->strip_zeros));
 		result = lappend(result, serializeInt(fdwState->oraTable->cols[i]->pkey));
 		result = lappend(result, serializeLong(fdwState->oraTable->cols[i]->val_size));
 		/* don't serialize val, val_len, val_len4, val_null and varno */
@@ -5273,6 +5345,8 @@ struct OracleFdwState
 		state->oraTable->cols[i]->pgtypmod = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
 		cell = list_next(list, cell);
 		state->oraTable->cols[i]->used = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
+		cell = list_next(list, cell);
+		state->oraTable->cols[i]->strip_zeros = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
 		cell = list_next(list, cell);
 		state->oraTable->cols[i]->pkey = (int)DatumGetInt32(((Const *)lfirst(cell))->constvalue);
 		cell = list_next(list, cell);
@@ -5546,6 +5620,7 @@ struct OracleFdwState
 		copy->oraTable->cols[i]->pgtype = orig->oraTable->cols[i]->pgtype;
 		copy->oraTable->cols[i]->pgtypmod = orig->oraTable->cols[i]->pgtypmod;
 		copy->oraTable->cols[i]->used = 0;
+		copy->oraTable->cols[i]->strip_zeros = orig->oraTable->cols[i]->strip_zeros;
 		copy->oraTable->cols[i]->pkey = orig->oraTable->cols[i]->pkey;
 		copy->oraTable->cols[i]->val = NULL;
 		copy->oraTable->cols[i]->val_size = orig->oraTable->cols[i]->val_size;
@@ -6377,9 +6452,27 @@ convertTuple(struct OracleFdwState *fdw_state, Datum *values, bool *nulls, bool 
 			error_context_stack = &errcb;
 			fdw_state->columnindex = index;
 
-			/* for string types, check that the data are in the database encoding */
 			if (pgtype == BPCHAROID || pgtype == VARCHAROID || pgtype == TEXTOID)
+			{
+				/* optionally strip zero bytes from string types */
+				if (fdw_state->oraTable->cols[index]->strip_zeros)
+				{
+					char *from_p, *to_p = value;
+					long new_length = value_len;
+
+					for (from_p = value; from_p < value + value_len; ++from_p)
+						if (*from_p != '\0')
+							*to_p++ = *from_p;
+						else
+							--new_length;
+
+					value_len = new_length;
+					value[value_len] = '\0';
+				}
+
+				/* check that the string types are in the database encoding */
 				(void)pg_verify_mbstr(GetDatabaseEncoding(), value, value_len, false);
+			}
 
 			/* call the type input function */
 			switch (pgtype)

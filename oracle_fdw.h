@@ -15,7 +15,7 @@
 #include <sys/types.h>
 
 /* oracle_fdw version */
-#define ORACLE_FDW_VERSION "2.2.0"
+#define ORACLE_FDW_VERSION "2.3.0devel"
 
 #ifdef OCI_ORACLE
 /*
@@ -113,6 +113,7 @@ struct oraColumn
 	Oid pgtype;              /* PostgreSQL data type */
 	int pgtypmod;            /* PostgreSQL type modifier */
 	int used;                /* is the column used in the query? */
+	int strip_zeros;         /* should ASCII zero be removed from Oracle strings? */
 	int pkey;                /* nonzero for primary keys, later set to the resjunk attribute number */
 	char *val;               /* buffer for Oracle to return results in (LOB locator for LOBs) */
 	long val_size;           /* allocated size in val */
@@ -194,16 +195,17 @@ extern void oracleCancel(void);
 extern void oracleEndTransaction(void *arg, int is_commit, int silent);
 extern void oracleEndSubtransaction(void *arg, int nest_level, int is_commit);
 extern int oracleIsStatementOpen(oracleSession *session);
-extern struct oraTable *oracleDescribe(oracleSession *session, char *schema, char *table, char *pgname, long max_long);
+extern struct oraTable *oracleDescribe(oracleSession *session, char *dblink, char *schema, char *table, char *pgname, long max_long);
 extern void oracleExplain(oracleSession *session, const char *query, int *nrows, char ***plan);
 extern void oraclePrepareQuery(oracleSession *session, const char *query, const struct oraTable *oraTable, unsigned int prefetch);
 extern int oracleExecuteQuery(oracleSession *session, const struct oraTable *oraTable, struct paramDesc *paramList);
 extern int oracleFetchNext(oracleSession *session);
+extern void oracleExecuteCall(oracleSession *session, char * const stmt);
 extern void oracleGetLob(oracleSession *session, void *locptr, oraType type, char **value, long *value_len, unsigned long trunc);
 extern void oracleClientVersion(int *major, int *minor, int *update, int *patch, int *port_patch);
 extern void oracleServerVersion(oracleSession *session, int *major, int *minor, int *update, int *patch, int *port_patch);
 extern void *oracleGetGeometryType(oracleSession *session);
-extern int oracleGetImportColumn(oracleSession *session, char *schema, char **tabname, char **colname, oraType *type, int *charlen, int *typeprec, int *typescale, int *nullable, int *key);
+extern int oracleGetImportColumn(oracleSession *session, char *dblink, char *schema, char **tabname, char **colname, oraType *type, int *charlen, int *typeprec, int *typescale, int *nullable, int *key);
 
 /*
  * functions defined in oracle_fdw.c

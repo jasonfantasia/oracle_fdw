@@ -118,6 +118,18 @@ some environment variables used for establishing Oracle connections.
 If called with the name of a foreign server, it will additionally return
 the Oracle server version.
 
+    FUNCTION oracle_execute(server name, stmt text) RETURNS void
+
+This function can be used to execute arbitrary SQL statements on the remote
+Oracle server.  That will only work with statements that do not return results
+(typically DDL statements).
+
+Be careful when using this function, since it might disturb the transaction
+management of oracle_fdw.  Remember that running a DDL statement in Oracle
+will issue an implicit COMMIT.
+You are best advised to use this function outside of multi-statement
+transactions.
+
 3 Options
 =========
 
@@ -180,6 +192,12 @@ Foreign table options
   queries; if you want to avoid that (or confusing Oracle error messages
   for more complicated queries), use the table option **readonly**.
 
+- **dblink** (optional)
+
+  The Oracle database link through which the table is accessed.  This name
+  must be written exactly as it occurs in Oracle's system catalog, so
+  normally consist of uppercase letters only.
+
 - **schema** (optional)
 
   The table's schema (or owner).  Useful to access tables that do not belong
@@ -238,6 +256,13 @@ Column options (from PostgreSQL 9.2 on)
   is considered a primary key column.  
   For UPDATE and DELETE to work, you must set this option on all columns
   that belong to the table's primary key.
+
+- **strip_zeros** (optional, defaults to "false")
+
+  If set to yes/on/true, ASCII 0 characters will be removed from the string
+  during transfer.  Such characters are valid in Oracle but not in PostgreSQL,
+  so they will cause an error when read by oracle_fdw.  This option only
+  make sense for `character`, `character varying` and `text` columns.
 
 4 Usage
 =======
@@ -481,20 +506,29 @@ following:
   ALL_TAB_COLUMNS.  That includes tables, views and materialized views,
   but not synonyms.
 
-- There are three supported options for IMPORT FOREIGN SCHEMA:
+- There are four supported options for IMPORT FOREIGN SCHEMA:
+
   - **case**: controls case folding for table and column names during import.  
     The possible values are:
     - `keep`: leave the names as they are in Oracle, usually in upper case.
     - `lower`: translate all table and column names to lower case.
     - `smart`: only translate names that are all upper case in Oracle
                (this is the default).
+
   - **collation**: the collation used for case folding for the `lower` and
     `smart` options of **case**.  
+
     The default value is `default` which is the database's default collation.
     Only collations in the `pg_catalog` schema are supported.
     See the `collname` values in the `pg_collation` catalog for a list of
     possible values.
+
+  - **dblink**: the Oracle database link through which the schema is accessed.
+    This name must be written exactly as it occurs in Oracle's system catalog,
+    so normally consist of uppercase letters only.
+
   - **readonly** (boolean): controls if imported tables can be modified.
+
     If set to `true`, all imported tables are created with the foreign
     table option **readonly** set to `true` (see the [Options](#3-options)
     section).  
@@ -670,39 +704,6 @@ The Oracle database must be prepared as follows:
   the regression test scripts).  The user needs CREATE SESSION and CREATE TABLE
   system privileges and enough quota on its default tablespace, as well as
   SELECT privileges on V$SQL and V$SQL_PLAN.
-- Two tables must be created as follows:
-  
-        CREATE TABLE scott.typetest1 (
-           id  NUMBER(5)
-              CONSTRAINT typetest1_pkey PRIMARY KEY,
-           c   CHAR(10 CHAR),
-           nc  NCHAR(10),
-           vc  VARCHAR2(10 CHAR),
-           nvc NVARCHAR2(10),
-           lc  CLOB,
-           r   RAW(10),
-           u   RAW(16),
-           lb  BLOB,
-           lr  LONG RAW,
-           b   NUMBER(1),
-           num NUMBER(7,5),
-           fl  BINARY_FLOAT,
-           db  BINARY_DOUBLE,
-           d   DATE,
-           ts  TIMESTAMP WITH TIME ZONE,
-           ids INTERVAL DAY TO SECOND,
-           iym INTERVAL YEAR TO MONTH
-        ) SEGMENT CREATION IMMEDIATE;
-
-        CREATE TABLE scott.gis (
-           id  NUMBER(5) PRIMARY KEY,
-           g   MDSYS.SDO_GEOMETRY
-        ) SEGMENT CREATION IMMEDIATE;
-
-- Gather statistics for the two tables:
-
-        EXEC DBMS_STATS.GATHER_TABLE_STATS ('SCOTT', 'TYPETEST1', NULL, 100);
-        EXEC DBMS_STATS.GATHER_TABLE_STATS ('SCOTT', 'GIS', NULL, 100);
 
 Set the environment for the PostgreSQL server so that it can establish an
 Oracle connection without connect string:

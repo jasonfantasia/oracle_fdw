@@ -802,7 +802,7 @@ oracleIsStatementOpen(oracleSession *session)
  * 		Returns a palloc'ed data structure with the results.
  */
 struct oraTable
-*oracleDescribe(oracleSession *session, char *schema, char *table, char *pgname, long max_long)
+*oracleDescribe(oracleSession *session, char *dblink, char *schema, char *table, char *pgname, long max_long)
 {
 	struct oraTable *reply;
 	OCIStmt *stmthp;
@@ -811,7 +811,7 @@ struct oraTable
 	ub1 csfrm;
 	sb2 precision;
 	sb1 scale;
-	char *qtable, *qschema = NULL, *tablename, *query;
+	char *qtable, *qdblink = NULL, *qschema = NULL, *tablename, *query;
 	OraText *ident, *typname, *typschema;
 	char *type_name, *type_schema;
 	ub4 ncols, ident_size, typname_size, typschema_size;
@@ -820,6 +820,11 @@ struct oraTable
 	/* get a complete quoted table name */
 	qtable = copyOraText(table, strlen(table), 1);
 	length = strlen(qtable);
+	if (dblink != NULL)
+	{
+		qdblink = copyOraText(dblink, strlen(dblink), 1);
+		length += strlen(qdblink) + 1;
+	}
 	if (schema != NULL)
 	{
 		qschema = copyOraText(schema, strlen(schema), 1);
@@ -833,7 +838,14 @@ struct oraTable
 		strcat(tablename, ".");
 	}
 	strcat(tablename, qtable);
+	if (dblink != NULL)
+	{
+		strcat(tablename, "@");
+		strcat(tablename, qdblink);
+	}
 	oracleFree(qtable);
+	if (dblink != NULL)
+		oracleFree(qdblink);
 	if (schema != NULL)
 		oracleFree(qschema);
 
@@ -904,6 +916,7 @@ struct oraTable
 		reply->cols[i-1]->pgtype = 0;
 		reply->cols[i-1]->pgtypmod = 0;
 		reply->cols[i-1]->used = 0;
+		reply->cols[i-1]->strip_zeros = 0;
 		reply->cols[i-1]->pkey = 0;
 		reply->cols[i-1]->val = NULL;
 		reply->cols[i-1]->val_len = 0;
@@ -2097,6 +2110,49 @@ oracleFetchNext(oracleSession *session)
 }
 
 /*
+ * oracleExecuteCall
+ * 		Execute an Oracle statement that has no results.
+ */
+void
+oracleExecuteCall(oracleSession *session, char * const stmt)
+{
+	OCIStmt *stmthp;
+
+	/* create statement handle */
+	allocHandle((void **)&stmthp, OCI_HTYPE_STMT, 0, session->envp->envhp, session->connp,
+		FDW_UNABLE_TO_CREATE_EXECUTION,
+		"error executing statement: OCIHandleAlloc failed to allocate statement handle");
+
+	/* prepare the query */
+	if (checkerr(
+		OCIStmtPrepare(stmthp, session->envp->errhp, (text *)stmt, (ub4) strlen(stmt),
+			(ub4) OCI_NTV_SYNTAX, (ub4) OCI_DEFAULT),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error executing statement: OCIStmtPrepare failed to prepare query",
+			oraMessage);
+	}
+
+	if (checkerr(
+		OCIStmtExecute(session->connp->svchp, stmthp, session->envp->errhp, (ub4)1, (ub4)0,
+			(CONST OCISnapshot *)NULL, (OCISnapshot *)NULL, OCI_DEFAULT),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		if (err_code == 24374)
+			oracleError(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"Oracle statement must not return a result");
+		else
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error executing statement: OCIStmtExecute failed to execute query",
+				oraMessage);
+	}
+
+	/* free the statement handle */
+	freeHandle(stmthp, session->connp);
+}
+
+/*
  * oracleGetLob
  * 		Get the LOB contents and store them in *value and *value_len.
  * 		If "trunc" is nonzero, it contains the number of bytes or characters to get.
@@ -2267,26 +2323,27 @@ void *oracleGetGeometryType(oracleSession *session)
  * 		Get the next element in the ordered list of tables and their columns for "schema".
  * 		Returns 0 if there are no more columns, -1 if the remote schema does not exist, else 1.
  */
-int oracleGetImportColumn(oracleSession *session, char *schema, char **tabname, char **colname, oraType *type, int *charlen, int *typeprec, int *typescale, int *nullable, int *key)
+int oracleGetImportColumn(oracleSession *session, char *dblink, char *schema, char **tabname, char **colname, oraType *type, int *charlen, int *typeprec, int *typescale, int *nullable, int *key)
 {
 	/* the static variables will contain data returned to the caller */
 	static char s_tabname[129], s_colname[129];
 	char typename[129] = { '\0' }, typeowner[129] = { '\0' }, isnull[2] = { '\0' };
 	int count = 0;
 	const char * const schema_query = "SELECT COUNT(*) FROM all_users WHERE username = :nsp";
-	const char * const column_query =
+	const char * const column_query_template =
 		"SELECT col.table_name, col.column_name, col.data_type, col.data_type_owner,\n"
 		"       col.char_length, col.data_precision, col.data_scale, col.nullable,\n"
 		"       CASE WHEN primkey_col.position IS NOT NULL THEN 1 ELSE 0 END AS primary_key\n"
-		"FROM all_tab_columns col,\n"
+		"FROM all_tab_columns%s col,\n"
 		"     (SELECT con.table_name, cons_col.column_name, cons_col.position\n"
-		"      FROM all_constraints con, all_cons_columns cons_col\n"
+		"      FROM all_constraints%s con, all_cons_columns%s cons_col\n"
 		"      WHERE con.owner = cons_col.owner AND con.table_name = cons_col.table_name\n"
 		"        AND con.constraint_name = cons_col.constraint_name\n"
 		"        AND con.constraint_type = 'P' AND con.owner = :nsp) primkey_col\n"
 		"WHERE col.table_name = primkey_col.table_name(+) AND col.column_name = primkey_col.column_name(+)\n"
 		"  AND col.owner = :nsp\n"
 		"ORDER BY col.table_name, col.column_id";
+	char *column_query = NULL, *table_suffix = NULL;
 	OCIBind *bndhp = NULL;
 	sb2 ind = 0, ind_tabname, ind_colname, ind_typename, ind_typeowner = OCI_IND_NOTNULL,
 		ind_charlen = OCI_IND_NOTNULL, ind_precision = OCI_IND_NOTNULL, ind_scale = OCI_IND_NOTNULL,
@@ -2386,6 +2443,22 @@ int oracleGetImportColumn(oracleSession *session, char *schema, char **tabname, 
 				oraMessage);
 		}
 
+		if (dblink == NULL)
+			table_suffix = "";
+		else
+		{
+			/* we have to add the quoted datanbase link */
+			char *qdblink = copyOraText(dblink, strlen(dblink), 1);
+			table_suffix = oracleAlloc(strlen(qdblink) + 2);
+			table_suffix[0] = '@';
+			table_suffix[1] = '\0';
+			strcat(table_suffix, qdblink);
+		}
+
+		/* construct the query by appending the dblink to the catalog tables */
+		column_query = oracleAlloc(strlen(column_query_template) - 6 + 3 * strlen(table_suffix) + 1);
+		sprintf(column_query, column_query_template, table_suffix, table_suffix, table_suffix);
+
 		/* prepare the query */
 		if (checkerr(
 			OCIStmtPrepare(session->stmthp, session->envp->errhp, (text *)column_query, (ub4) strlen(column_query),
@@ -2396,6 +2469,8 @@ int oracleGetImportColumn(oracleSession *session, char *schema, char **tabname, 
 				"error importing foreign schema: OCIStmtPrepare failed to prepare remote query",
 				oraMessage);
 		}
+
+		oracleFree(column_query);
 
 		/* bind the parameter */
 		if (checkerr(

@@ -1,3 +1,26 @@
+Version 2.3.0
+  Note: When upgrading from an older version of oracle_fdw, make sure to run
+        ALTER EXTENSION oracle_fdw UPDATE;
+        after installing the extension.
+
+  Enhancements:
+  - Add a function "oracle_execute" to execute arbitrary SQL statements on
+    Oracle.  The statements must not return a result (e.g. DDL statements).
+  - Add an option "dblink" for Oracle database links.
+    The option can be used on foreign tables or with IMPORT FOREIGN SCHEMA.
+    Patch by Nicolas Boullis.
+  - Add a column option "strip_zeros" that automatically strips ASCII 0
+    characters from strings.
+    Per request from Alexander Lampalzer.
+
+  Bugfixes:
+  - Fix bad results with uncorrelated subqueries.
+    This affects queries have a foreign scan with a filter based on a subplan.
+    Reported by "srakazmus".
+  - Fix "Internal oracle_fdw error: encountered unknown node type 144"
+    This can happen in plans involving tables with identity columns.
+    Reported by Yang Lin.
+
 Version 2.2.0, released 2019-10-10
   Enhancements:
   - Add support for COPY to foreign tables (from PostgreSQL v11 on).
