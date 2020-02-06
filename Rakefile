@@ -1,5 +1,7 @@
 # Rakefile
 
+PG_ROOT = File.expand_path("/Applications/Postgres.app/Contents/Versions")
+
 desc "Build files"
 task :build do
   sh "make"
@@ -29,6 +31,11 @@ task :update_rpath do
   end
 end
 
+desc "List Available Postgres.app Versions"
+task :list_versions do
+  sh "ls -l #{PG_ROOT}"
+end
+
 desc "Install extension (VERSIONS='')"
 task :install do
   if ENV["VERSIONS"]
@@ -36,16 +43,17 @@ task :install do
   else
     versions = ["latest"]
   end
-  pg_root = File.expand_path("/Applications/Postgres.app/Contents/Versions")
 
   versions.each do |v|
-    pg_dir = File.join(pg_root, v)
+    pg_dir = File.join(PG_ROOT, v)
     ext_dir = File.join(pg_dir, "share", "postgresql", "extension")
     lib_dir = File.join(pg_dir, "lib", "postgresql")
     
     if Dir.exist?(pg_dir)
       sh "cp -v oracle_fdw.control #{ext_dir}"
-      sh "cp -v oracle_fdw--1.1.sql #{ext_dir}"
+      sh "cp -v oracle_fdw--1.0--1.1.sql #{ext_dir}"
+      sh "cp -v oracle_fdw--1.1--1.2.sql #{ext_dir}"
+      sh "cp -v oracle_fdw--1.2.sql #{ext_dir}"
       sh "cp -v oracle_fdw.so #{lib_dir}"
     else
       puts "Missing dir: #{pg_dir}"
